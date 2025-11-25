@@ -2,15 +2,15 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import io
 
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-# Folder containing the final PNGs
+# Default image directory (for Streamlit Cloud: an "images" folder in the repo)
 DEFAULT_IMAGE_DIR = str(Path(__file__).parent / "images")
 
-
-# Where evaluations are stored (local CSV file)
+# Where evaluations are stored (local CSV file relative to app.py)
 EVAL_CSV_PATH = Path("evaluations.csv")
 
 
@@ -28,6 +28,26 @@ def init_session_state():
         st.session_state.current_index = 0
     if "image_dir" not in st.session_state:
         st.session_state.image_dir = DEFAULT_IMAGE_DIR
+    if "last_image_name" not in st.session_state:
+        st.session_state.last_image_name = None
+
+
+# keys we want to RESET when changing image
+ANSWER_KEYS = [
+    # Likert questions
+    "q1", "q2", "q3", "q4", "q5",
+    "q6", "q7", "q8", "q9", "q10",
+    "q11", "q12", "q13", "q14",
+    # comparative & open
+    "comp_quality", "aspects_better", "aspects_improve",
+    "strengths", "limitations", "recommendations", "willing_future",
+]
+
+
+def reset_answers():
+    for k in ANSWER_KEYS:
+        if k in st.session_state:
+            del st.session_state[k]
 
 
 def save_evaluation(record: dict):
@@ -40,89 +60,120 @@ def save_evaluation(record: dict):
 # UI
 # ---------------------------------------------------------
 def main():
-    st.set_page_config(page_title="Panoramic Image Evaluation", layout="wide")
+    st.set_page_config(page_title="Panoramic Image Evaluation Tool",
+                       layout="wide")
+
     init_session_state()
 
-    st.title("🦷 Panoramic Image Evaluation Tool")
-    st.write(
-        "This app allows dental professionals to evaluate **synthetic panoramic images** "
-        "generated from CBCT and stores the evaluations locally in `evaluations.csv`."
-    )
+    # ---------------- SIDEBAR: SETTINGS & NAV ----------------
+    with st.sidebar:
+        st.markdown("## ⚙️ Settings")
 
-    # ---------------- SIDEBAR ----------------
-    st.sidebar.header("Settings")
+        img_dir_input = st.text_input(
+            "Image directory",
+            value=st.session_state.image_dir,
+            help="Folder containing the panoramic PNG/JPG images.",
+        )
+        image_dir = Path(img_dir_input)
+        st.session_state.image_dir = img_dir_input
 
-    img_dir_input = st.sidebar.text_input(
-        "Image directory",
-        value=st.session_state.image_dir,
-        help="Path to the folder containing the PNG panoramas.",
-    )
+        if not image_dir.is_dir():
+            st.error(f"Directory not found: {image_dir}")
+            st.stop()
 
-    image_dir = Path(img_dir_input)
-    st.session_state.image_dir = img_dir_input
+        image_files = get_image_files(image_dir)
+        if not image_files:
+            st.error(f"No images found in: {image_dir}")
+            st.stop()
 
-    if not image_dir.is_dir():
-        st.error(f"Directory not found: {image_dir}")
-        st.stop()
-
-    image_files = get_image_files(image_dir)
-    if not image_files:
-        st.error(f"No PNG/JPG images found in: {image_dir}")
-        st.stop()
-
-    # Make sure index is in range
-    st.session_state.current_index = max(
-        0, min(st.session_state.current_index, len(image_files) - 1)
-    )
-
-    col_prev, col_info, col_next = st.sidebar.columns([1, 2, 1])
-
-    with col_prev:
-        if st.button("⬅ Previous", use_container_width=True):
-            if st.session_state.current_index > 0:
-                st.session_state.current_index -= 1
-
-    with col_next:
-        if st.button("Next ➡", use_container_width=True):
-            if st.session_state.current_index < len(image_files) - 1:
-                st.session_state.current_index += 1
-
-    with col_info:
-        st.write(
-            f"Image {st.session_state.current_index + 1} / {len(image_files)}"
+        # keep index in range
+        st.session_state.current_index = max(
+            0, min(st.session_state.current_index, len(image_files) - 1)
         )
 
-    # Dropdown to jump to a specific image
-    selected_name = st.sidebar.selectbox(
-        "Jump to image",
-        options=[p.name for p in image_files],
-        index=st.session_state.current_index,
+        # Previous / next buttons
+        col_prev, col_count, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("⬅ Prev", use_container_width=True):
+                if st.session_state.current_index > 0:
+                    st.session_state.current_index -= 1
+        with col_next:
+            if st.button("Next ➡", use_container_width=True):
+                if st.session_state.current_index < len(image_files) - 1:
+                    st.session_state.current_index += 1
+        with col_count:
+            st.markdown(
+                f"<div style='text-align:center;'>"
+                f"Image {st.session_state.current_index + 1} / {len(image_files)}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # dropdown to jump to specific image
+        names = [p.name for p in image_files]
+        selected_name = st.selectbox(
+            "Jump to image",
+            options=names,
+            index=st.session_state.current_index,
+        )
+        st.session_state.current_index = names.index(selected_name)
+
+        current_image = image_files[st.session_state.current_index]
+
+        st.markdown("---")
+        st.markdown("**Evaluations are stored in:**")
+        st.code(str(EVAL_CSV_PATH), language="bash")
+
+        # download button for evaluations csv if it exists
+        if EVAL_CSV_PATH.exists():
+            df_existing = pd.read_csv(EVAL_CSV_PATH)
+            csv_buf = io.StringIO()
+            df_existing.to_csv(csv_buf, index=False)
+            st.download_button(
+                "⬇️ Download all evaluations (CSV)",
+                data=csv_buf.getvalue(),
+                file_name="evaluations.csv",
+                mime="text/csv",
+            )
+
+    # ---------------- MAIN AREA ----------------
+    # reset answers if image changed
+    if st.session_state.last_image_name != current_image.name:
+        reset_answers()
+        st.session_state.last_image_name = current_image.name
+
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>🦷 Panoramic Image Evaluation Tool</h1>",
+        unsafe_allow_html=True,
     )
-    st.session_state.current_index = [p.name for p in image_files].index(
-        selected_name
+    st.markdown(
+        "<p style='font-size:0.95rem;color:#cccccc;'>"
+        "Evaluate synthetic panoramic images generated from CBCT. "
+        "Your ratings and comments are stored securely in <code>evaluations.csv</code> "
+        "on the server."
+        "</p>",
+        unsafe_allow_html=True,
     )
-    current_image = image_files[st.session_state.current_index]
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("Evaluations are stored in:")
-    st.sidebar.code(str(EVAL_CSV_PATH), language="bash")
+    st.markdown("---")
 
-    # ---------------- MAIN LAYOUT ----------------
-    st.subheader(f"Current Image: `{current_image.name}`")
-
-    # Show image
+    # Current image header + display
+    st.markdown(
+        f"### Current Image: "
+        f"<code>{current_image.name}</code>",
+        unsafe_allow_html=True,
+    )
     st.image(str(current_image), use_container_width=True)
 
     st.markdown("---")
 
     # ------------- SECTION 1: Respondent info -------------
-    st.header("Section 1 – Respondent Information (Optional)")
+    st.subheader("Section 1 – Respondent Information (Optional)")
 
     col1, col2 = st.columns(2)
     with col1:
-        resp_name = st.text_input("Full Name")
-        clinic = st.text_input("Clinic / Hospital")
-
+        resp_name = st.text_input("Full Name", key="resp_name")
+        clinic = st.text_input("Clinic / Hospital", key="clinic")
     with col2:
         specialization = st.selectbox(
             "Specialization",
@@ -134,15 +185,18 @@ def main():
                 "Orthodontist",
                 "Other",
             ],
+            key="specialization",
         )
         years_exp = st.selectbox(
             "Years of Experience",
             ["", "<5", "5–10", "10–20", ">20"],
+            key="years_exp",
         )
 
     avg_cases = st.selectbox(
         "Average number of panoramic cases per week",
         ["", "<10", "10–30", "30–50", ">50"],
+        key="avg_cases",
     )
 
     # ------------- Likert helper -------------
@@ -155,9 +209,10 @@ def main():
             key=key,
         )
 
+    # ---------- Section 2 ----------
     st.markdown("---")
-    st.header("Section 2 – Image Quality Assessment")
-    st.write("Rate 1 (Strongly Disagree) to 5 (Strongly Agree).")
+    st.subheader("Section 2 – Image Quality Assessment")
+    st.caption("Rate 1 (Strongly Disagree) to 5 (Strongly Agree).")
 
     q1 = likert(
         "1. The synthetic panoramic image appears realistic and similar to a true panoramic X-ray.",
@@ -180,8 +235,9 @@ def main():
         "q5",
     )
 
+    # ---------- Section 3 ----------
     st.markdown("---")
-    st.header("Section 3 – Diagnostic Reliability")
+    st.subheader("Section 3 – Diagnostic Reliability")
 
     q6 = likert(
         "6. The synthetic image preserves key diagnostic landmarks.",
@@ -204,8 +260,9 @@ def main():
         "q10",
     )
 
+    # ---------- Section 4 ----------
     st.markdown("---")
-    st.header("Section 4 – Comparative Evaluation")
+    st.subheader("Section 4 – Comparative Evaluation")
 
     comp_quality = st.radio(
         "1. Overall quality of the synthetic panoramic compared to a real panoramic image:",
@@ -238,8 +295,9 @@ def main():
         key="aspects_improve",
     )
 
+    # ---------- Section 5 ----------
     st.markdown("---")
-    st.header("Section 5 – Usability and Clinical Value")
+    st.subheader("Section 5 – Usability and Clinical Value")
 
     q11 = likert(
         "11. The synthetic panoramic can reduce the need for additional exposures.",
@@ -258,8 +316,9 @@ def main():
         "q14",
     )
 
+    # ---------- Section 6 ----------
     st.markdown("---")
-    st.header("Section 6 – Open Feedback")
+    st.subheader("Section 6 – Open Feedback")
 
     strengths = st.text_area(
         "1. What are the strengths of the synthetic panoramic images?",
@@ -284,7 +343,7 @@ def main():
     st.markdown("---")
 
     # ---------------- SUBMIT ----------------
-    if st.button("✅ Submit evaluation for this image"):
+    if st.button("✅ Submit evaluation for this image", type="primary"):
         record = {
             "timestamp": datetime.now().isoformat(),
             "image_filename": current_image.name,
@@ -325,6 +384,9 @@ def main():
             f"Evaluation saved for **{current_image.name}** "
             f"to `{EVAL_CSV_PATH}`."
         )
+
+        # after submission, clear answers for next image / repeat rating
+        reset_answers()
 
 
 if __name__ == "__main__":
